@@ -11,7 +11,7 @@ final Map<String, List<String>> employeeData = {
     'นายจิรศักดิ์ นพแสง',
     'นายณรงค์ จันทโพธิ์',
   ],
-  'Dev Led':[
+  'Dev Lead':[
     'นายเจตน์ษฎา ชิโนซะดิ',
   ],
   'Tester Lead': [

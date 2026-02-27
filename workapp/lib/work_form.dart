@@ -2,104 +2,186 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
-import 'dart:convert'; 
-import 'package:http/http.dart' as http; 
-import 'package:flutter/foundation.dart'; 
-import 'employees.dart';
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 class WorkRequestForm extends StatefulWidget {
-  const WorkRequestForm({super.key});
+  final bool isAdminMode;
+  const WorkRequestForm({super.key, this.isAdminMode = false});
   @override
   State<WorkRequestForm> createState() => _WorkRequestFormState();
 }
 
 class _WorkRequestFormState extends State<WorkRequestForm> {
-  String? selectedName;
-  String displayedPosition = "กรุณาเลือกชื่อ";
+  String? selectedEmployeeId, selectedEmployeeName, selectedEmployeePosition;
   final TextEditingController _locationController = TextEditingController();
   DateTimeRange? selectedDateRange;
-  TimeOfDay? startTime;
-  TimeOfDay? endTime;
-  String totalHours = '0';
-  int workDaysCount = 0;
-  XFile? _pickedFile; 
+  
+  // ปรับ Default เป็น 09:30 - 18:30 เพื่อให้ทำงานจริงครบ 8 ชม. หลังหักพัก
+  TimeOfDay? startTime = const TimeOfDay(hour: 9, minute: 30);
+  TimeOfDay? endTime = const TimeOfDay(hour: 18, minute: 30);
+  
+  String totalHours = '0'; 
+  XFile? _pickedFile;
   final ImagePicker _picker = ImagePicker();
 
-  List<String> getAllNames() {
-    List<String> names = [];
-    employeeData.forEach((position, list) => names.addAll(list));
-    names.sort();
-    return names;
+  @override
+  void initState() {
+    super.initState();
+    if (!widget.isAdminMode) _loadUser();
+    _calc(); // คำนวณค่าเริ่มต้นทันที
   }
 
-  String findPosition(String name) {
-    String found = "-";
-    employeeData.forEach((position, list) {
-      if (list.contains(name)) found = position;
-    });
-    return found;
+  Future<void> _loadUser() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      final doc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+      setState(() {
+        selectedEmployeeName = doc.data()?['name'];
+        selectedEmployeePosition = doc.data()?['position'];
+      });
+    }
+  }
+
+  // --- แก้ไข Logic: ตัดช่วง 12:00-13:00 ออกอัตโนมัติพนักงานแก้ไม่ได้ ---
+  void _calc() {
+    if (startTime != null && endTime != null) {
+      double start = startTime!.hour + (startTime!.minute / 60.0);
+      double end = endTime!.hour + (endTime!.minute / 60.0);
+      
+      if (end < start) end += 24; 
+
+      double diff = end - start;
+
+      // หักช่วงพักเที่ยง 12:00 - 13:00 ตามจริง
+      double breakStart = 12.0;
+      double breakEnd = 13.0;
+
+      double overlapStart = start > breakStart ? start : breakStart;
+      double overlapEnd = end < breakEnd ? end : breakEnd;
+
+      if (overlapStart < overlapEnd) {
+        double overlapDuration = overlapEnd - overlapStart;
+        diff -= overlapDuration;
+      }
+
+      int days = (selectedDateRange != null) ? (selectedDateRange!.duration.inDays + 1) : 1;
+      setState(() {
+        if (diff < 0) diff = 0;
+        totalHours = (diff * days).toStringAsFixed(1);
+      });
+    }
+  }
+
+  Future<void> _showImageSourceOptions() async {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (context) => SafeArea(
+        child: Wrap(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.camera_alt),
+              title: const Text('ถ่ายรูปใหม่ (Camera)'),
+              onTap: () {
+                _pickImage(ImageSource.camera);
+                Navigator.pop(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library),
+              title: const Text('เลือกจากคลังรูปภาพ (Gallery)'),
+              onTap: () {
+                _pickImage(ImageSource.gallery);
+                Navigator.pop(context);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _pickImage(ImageSource source) async {
-    final XFile? image = await _picker.pickImage(source: source, imageQuality: 15, maxWidth: 400);
+    final XFile? image = await _picker.pickImage(
+      source: source, 
+      imageQuality: 10, 
+      maxWidth: 600,
+    );
     if (image != null) setState(() => _pickedFile = image);
   }
 
-  void _calculateDuration() {
-    if (selectedDateRange != null && startTime != null && endTime != null) {
-      int count = 0;
-      DateTime current = selectedDateRange!.start;
-      while (current.isBefore(selectedDateRange!.end) || current.isAtSameMomentAs(selectedDateRange!.end)) {
-        if (current.weekday != DateTime.saturday && current.weekday != DateTime.sunday) count++;
-        current = current.add(const Duration(days: 1));
-      }
-      workDaysCount = count;
-      final now = DateTime.now();
-      final start = DateTime(now.year, now.month, now.day, startTime!.hour, startTime!.minute);
-      final end = DateTime(now.year, now.month, now.day, endTime!.hour, endTime!.minute);
-      var diffPerDay = end.difference(start).inMinutes / 60;
-      if (diffPerDay < 0) diffPerDay += 24; 
-      setState(() => totalHours = (diffPerDay * workDaysCount).toStringAsFixed(1));
-    }
-  }
+  Future<void> _sendEmailJS() async {
+    const serviceId = 'service_zxk182e'; 
+    const templateId = 'template_zf7z84p'; 
+    const publicKey = 'aFgdAGwPICmxIVno3';
 
-  Future<void> sendEmail() async {
-    if (selectedName == null || _pickedFile == null || selectedDateRange == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('กรุณากรอกข้อมูลและถ่ายรูปให้ครบถ้วน')));
-      return;
+    String base64Image = "";
+    if (_pickedFile != null) {
+      final bytes = await _pickedFile!.readAsBytes();
+      base64Image = base64Encode(bytes);
     }
-    showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+
     try {
-      final Uint8List imageBytes = await _pickedFile!.readAsBytes();
-      String base64Image = base64Encode(imageBytes);
-      final url = Uri.parse('https://api.emailjs.com/api/v1.0/email/send');
-      final response = await http.post(
-        url,
+      await http.post(
+        Uri.parse('https://api.emailjs.com/api/v1.0/email/send'),
         headers: {'Content-Type': 'application/json'},
         body: json.encode({
-          'service_id': 'service_zxk182e',   
-          'template_id': 'template_zf7z84p', 
-          'user_id': 'aFgdAGwPICmxIVno3',    
+          'service_id': serviceId,
+          'template_id': templateId,
+          'user_id': publicKey,
           'template_params': {
-            'employee_name': selectedName,
-            'position': displayedPosition,
+            'employee_name': selectedEmployeeName,
+            'position': selectedEmployeePosition,
             'work_location': _locationController.text,
-            'date_range': '${DateFormat('dd/MM/yyyy').format(selectedDateRange!.start)} - ${DateFormat('dd/MM/yyyy').format(selectedDateRange!.end)}',
+            'date_range': selectedDateRange != null
+                ? '${DateFormat('dd/MM/yy').format(selectedDateRange!.start)} - ${DateFormat('dd/MM/yy').format(selectedDateRange!.end)}'
+                : '-',
             'total_hours': totalHours,
-            'work_image': 'data:image/jpeg;base64,$base64Image',
+            'name': selectedEmployeeName,
+            'email': FirebaseAuth.instance.currentUser?.email ?? '',
+            'work_image': base64Image.isNotEmpty ? 'data:image/jpeg;base64,$base64Image' : '',
           }
         }),
       );
-      Navigator.pop(context); 
-      if (response.statusCode == 200) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('ส่งรายงานสำเร็จแล้ว!')));
+    } catch (e) {
+      print("EmailJS Exception: $e");
+    }
+  }
+
+  Future<void> _submit() async {
+    if (selectedEmployeeName == null || _locationController.text.isEmpty || selectedDateRange == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("กรุณากรอกข้อมูลให้ครบและเลือกวันที่")));
+      return;
+    }
+
+    showDialog(context: context, barrierDismissible: false, builder: (c) => const Center(child: CircularProgressIndicator()));
+    
+    try {
+      await FirebaseFirestore.instance.collection('work_requests').add({
+        'name': selectedEmployeeName,
+        'position': selectedEmployeePosition,
+        'location': _locationController.text,
+        'date_range': '${DateFormat('dd/MM/yy').format(selectedDateRange!.start)} - ${DateFormat('dd/MM/yy').format(selectedDateRange!.end)}',
+        'total_hours': totalHours,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+
+      await _sendEmailJS();
+
+      if (mounted) {
         Navigator.pop(context);
-      } else {
-        throw 'ส่งไม่สำเร็จ: ${response.body}';
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("บันทึกและส่งข้อมูลสำเร็จ!"), backgroundColor: Colors.indigo),
+        );
+        await Future.delayed(const Duration(milliseconds: 1500));
+        if (mounted) Navigator.pop(context);
       }
     } catch (e) {
-      Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('เกิดข้อผิดพลาด: $e')));
+      if (mounted) Navigator.pop(context);
     }
   }
 
@@ -107,100 +189,193 @@ class _WorkRequestFormState extends State<WorkRequestForm> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Column(
-          children: [
-            Text('IDPASSGLOBAL', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
-            Text('แจ้งงานนอกสถานที่', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w300)),
-          ],
-        ), 
-        backgroundColor: Colors.indigo[900], 
-        foregroundColor: Colors.white,
-        centerTitle: true,
-        toolbarHeight: 80,
-      ),
+          title: Text(widget.isAdminMode ? "ลงงานแทน" : "แจ้งงานนอกสถานที่"),
+          backgroundColor: Colors.indigo[900],
+          foregroundColor: Colors.white,
+          centerTitle: true),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('เลือกชื่อพนักงาน', style: TextStyle(fontWeight: FontWeight.bold)),
-            DropdownButtonFormField<String>(
-              isExpanded: true,
-              decoration: const InputDecoration(border: OutlineInputBorder()),
-              items: getAllNames().map((name) => DropdownMenuItem(value: name, child: Text(name))).toList(),
-              onChanged: (val) => setState(() {
-                selectedName = val;
-                displayedPosition = findPosition(val!);
-              }),
+        padding: const EdgeInsets.all(20),
+        child: Column(children: [
+          _profileHeader(),
+          const SizedBox(height: 20),
+          TextField(
+              controller: _locationController,
+              decoration: const InputDecoration(
+                  labelText: "สถานที่ปฏิบัติงาน",
+                  border: OutlineInputBorder(),
+                  prefixIcon: Icon(Icons.pin_drop))),
+          const SizedBox(height: 15),
+          _dateBtn(),
+          const SizedBox(height: 15),
+          Row(children: [
+            _timeBtn("เริ่ม", startTime, (t) {
+              startTime = t;
+              _calc();
+            }, const TimeOfDay(hour: 9, minute: 30)),
+            const SizedBox(width: 10),
+            _timeBtn("เลิก", endTime, (t) {
+              endTime = t;
+              _calc();
+            }, const TimeOfDay(hour: 18, minute: 30)),
+          ]),
+          const SizedBox(height: 20),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.indigo[50],
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.indigo[100]!)
             ),
-            const SizedBox(height: 10),
-            Text('ตำแหน่ง: $displayedPosition', style: const TextStyle(color: Colors.blue, fontWeight: FontWeight.bold)),
-            const Divider(height: 40),
-            const Text('สถานที่ปฏิบัติงาน', style: TextStyle(fontWeight: FontWeight.bold)),
-            TextField(controller: _locationController, decoration: const InputDecoration(border: OutlineInputBorder(), hintText: 'ระบุสถานที่/หน้างาน')),
-            const SizedBox(height: 20),
-            const Text('ช่วงวันที่', style: TextStyle(fontWeight: FontWeight.bold)),
-            OutlinedButton.icon(
-              onPressed: () async {
-                final r = await showDateRangePicker(context: context, firstDate: DateTime.now().subtract(const Duration(days: 30)), lastDate: DateTime(2030));
-                if (r != null) { setState(() => selectedDateRange = r); _calculateDuration(); }
-              },
-              icon: const Icon(Icons.date_range),
-              label: Text(selectedDateRange == null ? 'เลือกวันที่เริ่ม-จบ' : '${DateFormat('dd/MM/yyyy').format(selectedDateRange!.start)} - ${DateFormat('dd/MM/yyyy').format(selectedDateRange!.end)}'),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text("รวมเวลาทำงานจริง:", style: TextStyle(fontWeight: FontWeight.bold)),
+                Text("$totalHours ชม.", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.indigo)),
+              ],
             ),
-            const SizedBox(height: 15),
-            Row(children: [
-              _timePicker('เริ่มงาน', startTime, (t) { setState(() => startTime = t); _calculateDuration(); }),
-              const SizedBox(width: 10),
-              _timePicker('เลิกงาน', endTime, (t) { setState(() => endTime = t); _calculateDuration(); }),
-            ]),
-            const SizedBox(height: 15),
-            Container(
-              padding: const EdgeInsets.all(15),
-              decoration: BoxDecoration(color: Colors.blue[50], borderRadius: BorderRadius.circular(8)),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text('จำนวน: $workDaysCount วัน', style: const TextStyle(fontWeight: FontWeight.bold)),
-                  Text('รวม: $totalHours ชม.', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue, fontSize: 18)),
-                ],
-              ),
-            ),
-            const SizedBox(height: 25),
-            const Text('รูปถ่ายหน้างาน / เช็คอิน', style: TextStyle(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 10),
-            Container(
-              height: 200, width: double.infinity,
-              decoration: BoxDecoration(border: Border.all(color: Colors.grey), borderRadius: BorderRadius.circular(10), color: Colors.grey[100]),
-              child: _pickedFile == null
-                  ? Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                      const Icon(Icons.camera_alt, size: 50, color: Colors.grey),
-                      Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                        ElevatedButton(onPressed: () => _pickImage(ImageSource.camera), child: const Text('ถ่ายรูป')),
-                        const SizedBox(width: 10),
-                        ElevatedButton(onPressed: () => _pickImage(ImageSource.gallery), child: const Text('อัลบั้ม')),
-                      ])
-                    ])
-                  : Stack(children: [
-                        ClipRRect(borderRadius: BorderRadius.circular(10), child: kIsWeb ? Image.network(_pickedFile!.path, width: double.infinity, height: 200, fit: BoxFit.cover) : Image.file(File(_pickedFile!.path), width: double.infinity, height: 200, fit: BoxFit.cover)),
-                        Positioned(top: 5, right: 5, child: CircleAvatar(backgroundColor: Colors.red, child: IconButton(icon: const Icon(Icons.close, color: Colors.white), onPressed: () => setState(() => _pickedFile = null)))),
-                    ]),
-            ),
-            const SizedBox(height: 30),
-            SizedBox(width: double.infinity, height: 55, child: ElevatedButton(onPressed: sendEmail, style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo[900]), child: const Text('ส่งข้อมูลการทำงาน', style: TextStyle(color: Colors.white, fontSize: 18)))),
-          ],
-        ),
+          ),
+          const Text("* ระบบหักเวลาพักเที่ยง (12:00-13:00) อัตโนมัติ", style: TextStyle(color: Colors.grey, fontSize: 11)),
+          const SizedBox(height: 20),
+          const Text("หลักฐานการปฏิบัติงาน (รูปหน้างาน)",
+              style: TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 10),
+          _imageBox(),
+          const SizedBox(height: 30),
+          ElevatedButton(
+              onPressed: _submit,
+              style: ElevatedButton.styleFrom(
+                  minimumSize: const Size(double.infinity, 55),
+                  backgroundColor: Colors.indigo[900],
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(15))),
+              child: const Text("ยืนยันส่งข้อมูล",
+                  style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold))),
+        ]),
       ),
     );
   }
 
-  Widget _timePicker(String label, TimeOfDay? time, Function(TimeOfDay) onSelect) {
-    return Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text(label),
-      OutlinedButton(onPressed: () async {
-        final t = await showTimePicker(context: context, initialTime: TimeOfDay.now());
-        if (t != null) onSelect(t);
-      }, child: Text(time == null ? '--:--' : time.format(context))),
-    ]));
+  Widget _imageBox() {
+    return GestureDetector(
+      onTap: _showImageSourceOptions,
+      child: Container(
+        height: 180,
+        width: double.infinity,
+        decoration: BoxDecoration(
+            color: Colors.grey[100],
+            borderRadius: BorderRadius.circular(15),
+            border: Border.all(color: Colors.grey[300]!, width: 2)),
+        child: _pickedFile == null
+            ? const Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                    Icon(Icons.add_a_photo_rounded, size: 50, color: Colors.grey),
+                    SizedBox(height: 10),
+                    Text("กดเพื่อถ่ายรูป หรือ เลือกจากคลัง", style: TextStyle(color: Colors.grey)),
+                  ])
+            : Stack(
+                fit: StackFit.expand,
+                children: [
+                  ClipRRect(
+                      borderRadius: BorderRadius.circular(13),
+                      child: kIsWeb
+                          ? Image.network(_pickedFile!.path, fit: BoxFit.cover)
+                          : Image.file(File(_pickedFile!.path), fit: BoxFit.cover)),
+                  Positioned(
+                    right: 8, top: 8,
+                    child: CircleAvatar(
+                      backgroundColor: Colors.red.withOpacity(0.8),
+                      radius: 18,
+                      child: IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.white, size: 18),
+                          onPressed: () => setState(() => _pickedFile = null)),
+                    ),
+                  ),
+                ],
+              ),
+      ),
+    );
+  }
+
+  Widget _profileHeader() {
+    return Container(
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(15),
+          border: Border.all(color: Colors.grey[200]!)),
+      child: Row(children: [
+        const Icon(Icons.badge_rounded, size: 40, color: Colors.indigo),
+        const SizedBox(width: 15),
+        Expanded(
+            child: widget.isAdminMode
+                ? StreamBuilder<QuerySnapshot>(
+                    stream: FirebaseFirestore.instance.collection('users').snapshots(),
+                    builder: (context, snap) {
+                      if (!snap.hasData) return const Text("โหลดชื่อ...");
+                      return DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                        isExpanded: true,
+                        value: selectedEmployeeId,
+                        hint: const Text("เลือกพนักงาน"),
+                        items: snap.data!.docs
+                            .map((doc) => DropdownMenuItem(
+                                value: doc.id,
+                                child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(doc['name'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                                      Text(doc['position'], style: const TextStyle(color: Colors.grey, fontSize: 11)),
+                                    ]),
+                                onTap: () {
+                                  selectedEmployeeName = doc['name'];
+                                  selectedEmployeePosition = doc['position'];
+                                }))
+                            .toList(),
+                        onChanged: (v) => setState(() => selectedEmployeeId = v),
+                      ));
+                    })
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                        Text(selectedEmployeeName ?? "...", style: const TextStyle(fontWeight: FontWeight.bold)),
+                        Text(selectedEmployeePosition ?? "...", style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                      ]))
+      ]),
+    );
+  }
+
+  Widget _dateBtn() {
+    return OutlinedButton.icon(
+        style: OutlinedButton.styleFrom(minimumSize: const Size(double.infinity, 50)),
+        onPressed: () async {
+          final r = await showDateRangePicker(
+              context: context,
+              firstDate: DateTime.now().subtract(const Duration(days: 30)),
+              lastDate: DateTime(2030));
+          if (r != null) {
+            setState(() {
+              selectedDateRange = r;
+              _calc();
+            });
+          }
+        },
+        icon: const Icon(Icons.date_range),
+        label: Text(selectedDateRange == null
+            ? "เลือกวันที่"
+            : "${DateFormat('dd/MM/yy').format(selectedDateRange!.start)} - ${DateFormat('dd/MM/yy').format(selectedDateRange!.end)}"));
+  }
+
+  Widget _timeBtn(String l, TimeOfDay? t, Function(TimeOfDay) s, TimeOfDay defaultT) {
+    return Expanded(
+        child: OutlinedButton(
+            onPressed: () async {
+              final res = await showTimePicker(context: context, initialTime: t ?? defaultT);
+              if (res != null) {
+                setState(() => s(res));
+                _calc();
+              }
+            },
+            child: Text(t == null ? l : t.format(context))));
   }
 }

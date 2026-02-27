@@ -2,68 +2,121 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
-import 'employees.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class LeaveRequestForm extends StatefulWidget {
-  const LeaveRequestForm({super.key});
+  final bool isAdminMode;
+  const LeaveRequestForm({super.key, this.isAdminMode = false});
   @override
   State<LeaveRequestForm> createState() => _LeaveRequestFormState();
 }
 
 class _LeaveRequestFormState extends State<LeaveRequestForm> {
-  String? selectedName;
-  String displayedPosition = "กรุณาเลือกชื่อ"; 
-  String? leaveType;
-  final TextEditingController _reasonController = TextEditingController();
-  DateTimeRange? leaveDateRange;
-  final List<String> leaveTypes = ['ลาป่วย', 'ลากิจ', 'ลาพักร้อน', 'ลาอื่น ๆ'];
+  String? selectedEmployeeId, selectedEmployeeName, selectedEmployeePosition, selectedType;
+  final TextEditingController _reason = TextEditingController();
+  DateTimeRange? selectedRange;
 
-  List<String> getAllNames() {
-    List<String> names = [];
-    employeeData.forEach((position, list) => names.addAll(list));
-    names.sort();
-    return names;
+  @override
+  void initState() {
+    super.initState();
+    if (!widget.isAdminMode) _loadUser();
   }
 
-  String findPosition(String name) {
-    String found = "-";
-    employeeData.forEach((position, list) { if (list.contains(name)) found = position; });
-    return found;
+  Future<void> _loadUser() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      final doc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+      setState(() {
+        selectedEmployeeName = doc.data()?['name'];
+        selectedEmployeePosition = doc.data()?['position'];
+      });
+    }
   }
 
-  Future<void> sendLeaveEmail() async {
-    if (selectedName == null || leaveType == null || leaveDateRange == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('กรุณากรอกข้อมูลการลาให้ครบถ้วน')));
+  Future<void> _sendEmailJS() async {
+    const serviceId = 'service_zxk182e'; 
+    const templateId = 'template_cn7r5nd'; 
+    const publicKey = 'aFgdAGwPICmxIVno3';
+
+    try {
+      await http.post(Uri.parse('https://api.emailjs.com/api/v1.0/email/send'),
+          headers: {'Content-Type': 'application/json'},
+          body: json.encode({
+            'service_id': serviceId,
+            'template_id': templateId,
+            'user_id': publicKey,
+            'template_params': {
+              'leave_name': selectedEmployeeName, // ตรงกับ {{leave_name}} ในรูป
+              'leave_type': selectedType,         // ตรงกับ {{leave_type}} ในรูป
+              'start_date': selectedRange != null ? DateFormat('dd/MM/yy').format(selectedRange!.start) : '-', // ตรงกับ {{start_date}}
+              'end_date': selectedRange != null ? DateFormat('dd/MM/yy').format(selectedRange!.end) : '-',     // ตรงกับ {{end_date}}
+              'reason': _reason.text,             // ตรงกับ {{reason}}
+              'name': selectedEmployeeName,       // สำหรับ From Name
+              'email': FirebaseAuth.instance.currentUser?.email ?? '', // สำหรับ Reply To
+            }
+          }));
+    } catch (e) {
+      print("EmailJS Error: $e");
+    }
+  }
+
+  Future<void> _submit() async {
+    if (selectedEmployeeName == null || selectedType == null || selectedRange == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("กรุณากรอกข้อมูลให้ครบถ้วน"), backgroundColor: Colors.orange)
+      );
       return;
     }
-    showDialog(context: context, barrierDismissible: false, builder: (context) => const Center(child: CircularProgressIndicator()));
+
+    // แสดง Loading
+    showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (c) => const Center(child: CircularProgressIndicator()));
+
     try {
-      final url = Uri.parse('https://api.emailjs.com/api/v1.0/email/send');
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: json.encode({
-          'service_id': 'service_zxk182e',   
-          'template_id': 'template_cn7r5nd', 
-          'user_id': 'aFgdAGwPICmxIVno3',    
-          'template_params': {
-            'leave_name': selectedName,
-            'position': displayedPosition, 
-            'leave_type': leaveType,
-            'start_date': DateFormat('dd/MM/yyyy').format(leaveDateRange!.start),
-            'end_date': DateFormat('dd/MM/yyyy').format(leaveDateRange!.end),
-            'reason': _reasonController.text.isEmpty ? 'ไม่ได้ระบุ' : _reasonController.text,
-          }
-        }),
-      );
-      Navigator.pop(context);
-      if (response.statusCode == 200) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('ส่งใบลาสำเร็จแล้ว!')));
-        Navigator.pop(context);
-      } else { throw 'ส่งไม่สำเร็จ: ${response.body}'; }
+      // 1. บันทึกลง Firebase (ใช้ชื่อฟิลด์ให้ตรงเพื่อให้ Admin ดึงไปโชว์ได้)
+      await FirebaseFirestore.instance.collection('leave_requests').add({
+        'name': selectedEmployeeName,
+        'position': selectedEmployeePosition,
+        'type': selectedType,
+        'reason': _reason.text,
+        'start_date': DateFormat('dd/MM/yy').format(selectedRange!.start),
+        'end_date': DateFormat('dd/MM/yy').format(selectedRange!.end),
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+
+      // 2. ส่ง Email ผ่าน EmailJS
+      await _sendEmailJS();
+
+      if (mounted) {
+        Navigator.pop(context); // ปิด Loading Indicator
+
+        // 3. แสดงแถบแจ้งเตือนว่าส่งสำเร็จ
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.white),
+                SizedBox(width: 10),
+                Text("ส่งใบแจ้งลาสำเร็จเรียบร้อยแล้ว!"),
+              ],
+            ),
+            backgroundColor: Colors.green,
+            duration: Duration(seconds: 2),
+          ),
+        );
+
+        // 4. รอสักครู่แล้วค่อยกลับหน้า Dashboard
+        await Future.delayed(const Duration(milliseconds: 1500));
+        if (mounted) Navigator.pop(context);
+      }
     } catch (e) {
-      Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('เกิดข้อผิดพลาด: $e')));
+      if (mounted) Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("เกิดข้อผิดพลาด: $e"), backgroundColor: Colors.red)
+      );
     }
   }
 
@@ -71,66 +124,119 @@ class _LeaveRequestFormState extends State<LeaveRequestForm> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Column(
-          children: [
-            Text('IDPASSGLOBAL', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
-            Text('แบบฟอร์มแจ้งลาหยุด', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w300)),
-          ],
-        ), 
-        backgroundColor: Colors.orange[800], 
-        foregroundColor: Colors.white,
-        centerTitle: true,
-        toolbarHeight: 80,
-      ),
+          title: Text(widget.isAdminMode ? "แจ้งลาแทน" : "แจ้งลาหยุดงาน"),
+          backgroundColor: Colors.red[800],
+          foregroundColor: Colors.white,
+          centerTitle: true),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.all(25.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('👤 เลือกชื่อพนักงาน', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-            const SizedBox(height: 8),
-            DropdownButtonFormField<String>(
-              isExpanded: true,
-              decoration: const InputDecoration(border: OutlineInputBorder(), filled: true, fillColor: Colors.white),
-              items: getAllNames().map((name) => DropdownMenuItem(value: name, child: Text(name))).toList(),
-              onChanged: (val) => setState(() { selectedName = val; displayedPosition = findPosition(val!); }),
-            ),
-            const SizedBox(height: 10),
-            Text('ตำแหน่ง: $displayedPosition', style: const TextStyle(color: Colors.blue, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 25),
-            const Text('📌 ประเภทการลา', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-            const SizedBox(height: 8),
-            DropdownButtonFormField<String>(
-              isExpanded: true,
-              decoration: const InputDecoration(border: OutlineInputBorder(), filled: true, fillColor: Colors.white),
-              items: leaveTypes.map((type) => DropdownMenuItem(value: type, child: Text(type))).toList(),
-              onChanged: (val) => setState(() => leaveType = val),
-            ),
-            const SizedBox(height: 25),
-            const Text('📅 ช่วงวันที่ต้องการลาหยุด', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-            const SizedBox(height: 8),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 20), side: BorderSide(color: Colors.orange[800]!, width: 1.5), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
-                onPressed: () async {
-                  final r = await showDateRangePicker(context: context, firstDate: DateTime.now().subtract(const Duration(days: 7)), lastDate: DateTime(2030));
-                  if (r != null) setState(() => leaveDateRange = r);
-                },
-                icon: Icon(Icons.calendar_today, color: Colors.orange[800]),
-                label: Text(leaveDateRange == null ? 'กดเพื่อเลือกวันที่ เริ่ม - จบ' : '${DateFormat('dd/MM/yyyy').format(leaveDateRange!.start)} - ${DateFormat('dd/MM/yyyy').format(leaveDateRange!.end)}', style: TextStyle(fontSize: 16, color: Colors.orange[800], fontWeight: FontWeight.bold)),
-              ),
-            ),
-            const SizedBox(height: 25),
-            const Text('📝 เหตุผลการลา / รายละเอียดเพิ่มเติม', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-            const SizedBox(height: 8),
-            TextField(controller: _reasonController, maxLines: 4, decoration: const InputDecoration(border: OutlineInputBorder(), hintText: 'ระบุรายละเอียดเพิ่มเติม', filled: true, fillColor: Colors.white)),
-            const SizedBox(height: 45),
-            SizedBox(width: double.infinity, height: 65, child: ElevatedButton(onPressed: sendLeaveEmail, style: ElevatedButton.styleFrom(backgroundColor: Colors.orange[800], shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)), elevation: 6), child: const Text('ส่งข้อมูลการลาหยุดงาน', style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)))),
-          ],
-        ),
+        padding: const EdgeInsets.all(20),
+        child: Column(children: [
+          _profileHeader(),
+          const SizedBox(height: 20),
+          DropdownButtonFormField<String>(
+            decoration: const InputDecoration(
+                labelText: "ประเภทการลา", border: OutlineInputBorder()),
+            items: ['ลาป่วย', 'ลากิจ', 'ลาพักร้อน', 'ลาอื่นๆ']
+                .map((t) => DropdownMenuItem(value: t, child: Text(t)))
+                .toList(),
+            onChanged: (v) => setState(() => selectedType = v),
+          ),
+          const SizedBox(height: 15),
+          OutlinedButton(
+              style: OutlinedButton.styleFrom(
+                  minimumSize: const Size(double.infinity, 50)),
+              onPressed: () async {
+                final r = await showDateRangePicker(
+                    context: context,
+                    firstDate: DateTime.now().subtract(const Duration(days: 30)),
+                    lastDate: DateTime(2030));
+                if (r != null) setState(() => selectedRange = r);
+              },
+              child: Text(selectedRange == null
+                  ? "เลือกวันที่ลา"
+                  : "${DateFormat('dd/MM/yy').format(selectedRange!.start)} - ${DateFormat('dd/MM/yy').format(selectedRange!.end)}")),
+          const SizedBox(height: 15),
+          TextField(
+              controller: _reason,
+              maxLines: 3,
+              decoration: const InputDecoration(
+                  labelText: "เหตุผลการลา", border: OutlineInputBorder())),
+          const SizedBox(height: 30),
+          ElevatedButton(
+              onPressed: _submit,
+              style: ElevatedButton.styleFrom(
+                  minimumSize: const Size(double.infinity, 55),
+                  backgroundColor: Colors.red[800],
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(15))),
+              child: const Text("ส่งข้อมูลการลา",
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold))),
+        ]),
       ),
-      backgroundColor: Colors.grey[100], 
+    );
+  }
+
+  Widget _profileHeader() {
+    return Container(
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(15),
+          border: Border.all(color: Colors.grey[200]!)),
+      child: Row(children: [
+        Icon(Icons.person_search_rounded, size: 40, color: Colors.red[800]),
+        const SizedBox(width: 15),
+        Expanded(
+            child: widget.isAdminMode
+                ? StreamBuilder<QuerySnapshot>(
+                    stream: FirebaseFirestore.instance
+                        .collection('users')
+                        .snapshots(),
+                    builder: (context, snap) {
+                      if (!snap.hasData) return const Text("โหลดชื่อ...");
+                      return DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                        isExpanded: true,
+                        value: selectedEmployeeId,
+                        hint: const Text("เลือกพนักงาน"),
+                        items: snap.data!.docs
+                            .map((doc) => DropdownMenuItem(
+                                value: doc.id,
+                                child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(doc['name'],
+                                          style: const TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 14)),
+                                      Text(doc['position'],
+                                          style: const TextStyle(
+                                              color: Colors.grey,
+                                              fontSize: 11)),
+                                    ]),
+                                onTap: () {
+                                  selectedEmployeeName = doc['name'];
+                                  selectedEmployeePosition = doc['position'];
+                                }))
+                            .toList(),
+                        onChanged: (v) => setState(() => selectedEmployeeId = v),
+                      ));
+                    })
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                        Text(selectedEmployeeName ?? "...",
+                            style:
+                                const TextStyle(fontWeight: FontWeight.bold)),
+                        Text(selectedEmployeePosition ?? "...",
+                            style: const TextStyle(
+                                color: Colors.grey, fontSize: 12)),
+                      ]))
+      ]),
     );
   }
 }

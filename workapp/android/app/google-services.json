@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "305568589097",
+    "project_id": "idpassglobal-app",
+    "storage_bucket": "idpassglobal-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:305568589097:android:0337757b9701a382688338",
+        "android_client_info": {
+          "package_name": "com.example.workapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCJZrh3UUfX5vZWUfkLwdZuv-LticpTwRo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
